@@ -1,4 +1,4 @@
-import { auth, db } from "../firebase_config.js";
+import { auth, db, rtdb } from "../firebase_config.js";
 import {
   onAuthStateChanged,
   signOut,
@@ -17,6 +17,14 @@ import {
   deleteDoc,
   getDoc,
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import {
+  ref,
+  onValue,
+  set,
+  push,
+  remove,
+  update
+} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
 // Referencias a elementos del DOM
 const userName = document.getElementById("userName");
@@ -167,7 +175,15 @@ loadModals().then(() => {
 
         if (label) {
             try {
-                await addDoc(collection(db, "parkings"), { label, status, device });
+                // Usar Realtime Database en lugar de Firestore
+                const parkingsRef = ref(rtdb, 'parkings');
+                const newParkingRef = push(parkingsRef);
+                await set(newParkingRef, { 
+                    label, 
+                    status, 
+                    device,
+                    updated_at: Date.now()
+                });
                 alert("Parking agregado correctamente");
                 addParkingModal.style.display = "none";
             } catch (error) {
@@ -225,47 +241,102 @@ document.getElementById("messagesButton").addEventListener("click", () => {
 
 // Obtener parkings
 const getParkings = () => {
-    const q = query(collection(db, "parkings"));
-    onSnapshot(q, (snapshot) => {
+    console.log("Iniciando obtención de parkings desde RTDB...");
+    // Usar Realtime Database en lugar de Firestore
+    const parkingsRef = ref(rtdb, 'parkings');
+    
+    onValue(parkingsRef, (snapshot) => {
+        console.log("Respuesta de RTDB recibida");
         parkingsList.innerHTML = ""; // Limpiar lista
-        snapshot.forEach((doc) => {
-            const parking = doc.data();
-            const parkingItem = document.createElement("div");
-            parkingItem.className = "parking-item";
+        
+        if (snapshot.exists()) {
+            console.log("✅ Datos encontrados en parkings");
+            const data = snapshot.val();
+            console.log("Datos recibidos:", JSON.stringify(data));
+            
+            // Verificar si data es null o undefined
+            if (!data) {
+                console.error("❌ Los datos son null o undefined");
+                parkingsList.innerHTML = "<p>No hay cajones disponibles. Por favor agregue uno.</p>";
+                return;
+            }
+            
+            // Verificar si data es un objeto vacío
+            if (Object.keys(data).length === 0) {
+                console.log("📣 No hay cajones configurados");
+                parkingsList.innerHTML = "<p>No hay cajones configurados. Puede agregar uno con el botón de abajo.</p>";
+                return;
+            }
+            
+            // Convertir el objeto en array para facilitar la iteración
+            let count = 0;
+            Object.entries(data).forEach(([key, parking]) => {
+                console.log(`Procesando parking ${key}:`, parking);
+                count++;
+                
+                const parkingItem = document.createElement("div");
+                parkingItem.className = "parking-item";
 
-            // Mostrar nombre y estado del parking
-            parkingItem.innerHTML = `
-                <span>${parking.label}</span>
-                <span class="parking-status ${parking.status}">${parking.status}</span>
-                <div>
-                    <button onclick="updateParkingStatus('${doc.id}', 'libre')" class="btn-small green">Disponible</button>
-                    <button onclick="updateParkingStatus('${doc.id}', 'ocupado')" class="btn-small red">Ocupado</button>
-                    <button onclick="updateParkingStatus('${doc.id}', 'servicio')" class="btn-small orange">En Servicio</button>
-                    <button onclick="deleteParking('${doc.id}')" class="btn-small grey">Eliminar</button>
-                </div>
-            `;
-            parkingsList.appendChild(parkingItem);
-        });
+                // Mostrar nombre y estado del parking
+                parkingItem.innerHTML = `
+                    <span>${parking.label}</span>
+                    <span class="parking-status ${parking.status}">${parking.status}</span>
+                    <div>
+                        <button class="btn-small green" data-id="${key}" data-status="libre">Disponible</button>
+                        <button class="btn-small red" data-id="${key}" data-status="ocupado">Ocupado</button>
+                        <button class="btn-small orange" data-id="${key}" data-status="servicio">En Servicio</button>
+                        <button class="btn-small grey" data-id="${key}" data-action="delete">Eliminar</button>
+                    </div>
+                `;
+                parkingsList.appendChild(parkingItem);
+                
+                // Agregar event listeners a los botones
+                const buttons = parkingItem.querySelectorAll('button');
+                buttons.forEach(button => {
+                    button.addEventListener('click', () => {
+                        const id = button.dataset.id;
+                        const action = button.dataset.action;
+                        
+                        if (action === 'delete') {
+                            deleteParking(id);
+                        } else {
+                            updateParkingStatus(id, button.dataset.status);
+                        }
+                    });
+                });
+            });
+            
+            console.log(`Total de cajones procesados: ${count}`);
+        } else {
+            console.error("❌ No existen datos en la ruta 'parkings'");
+            parkingsList.innerHTML = "<p>No hay cajones configurados en el sistema. Utilice el botón para agregar uno.</p>";
+        }
+    }, (error) => {
+        console.error("Error al obtener datos de parkings:", error);
+        parkingsList.innerHTML = `<p>Error al cargar los cajones: ${error.message}</p>`;
     });
 };
 
-// Actualizar estado del parking
-window.updateParkingStatus = async (parkingId, status) => {
+// Función para actualizar el estado del parking
+window.updateParkingStatus = (parkingId, status) => {
     try {
-        await updateDoc(doc(db, "parkings", parkingId), { status });
-        alert("Estado del parking actualizado correctamente");
+        const parkingRef = ref(rtdb, `parkings/${parkingId}`);
+        update(parkingRef, { 
+            status,
+            updated_at: Date.now()
+        });
     } catch (error) {
         console.error("Error al actualizar el estado del parking:", error);
         alert("Error al actualizar el estado del parking. Inténtalo de nuevo.");
     }
 };
 
-// Eliminar parking
-window.deleteParking = async (parkingId) => {
-    if (confirm("¿Estás seguro de eliminar este parking?")) {
+// Función para eliminar un parking
+window.deleteParking = (parkingId) => {
+    if (confirm("¿Estás seguro de que deseas eliminar este parking?")) {
         try {
-            await deleteDoc(doc(db, "parkings", parkingId));
-            alert("Parking eliminado correctamente");
+            const parkingRef = ref(rtdb, `parkings/${parkingId}`);
+            remove(parkingRef);
         } catch (error) {
             console.error("Error al eliminar el parking:", error);
             alert("Error al eliminar el parking. Inténtalo de nuevo.");
@@ -273,5 +344,83 @@ window.deleteParking = async (parkingId) => {
     }
 };
 
-// Inicializar
-getParkings();
+// Función para verificar la conexión a Firebase
+const checkFirebaseConnection = async () => {
+    try {
+        console.log("Verificando conexión con Firebase...");
+        // Primero intentamos con el endpoint del servidor Flask
+        const serverCheck = await fetch('/api/check-firebase');
+        const serverResponse = await serverCheck.json();
+        
+        if (serverResponse.connected) {
+            console.log("✅ Conexión verificada con el servidor:", serverResponse);
+            return true;
+        }
+        
+        // Si el servidor no está disponible, intentamos directo con Firebase
+        console.log("⚠️ Verificación con el servidor falló. Intentando directamente...");
+        
+        // Verificar usando RTDB directamente
+        const testRef = ref(rtdb, 'system/test');
+        return new Promise((resolve) => {
+            onValue(testRef, (snapshot) => {
+                console.log("✅ Verificación directa con Firebase exitosa");
+                resolve(true);
+            }, (error) => {
+                console.error("❌ Error en verificación directa:", error);
+                resolve(false);
+            }, { onlyOnce: true });
+            
+            // Timeout en caso de que Firebase no responda
+            setTimeout(() => {
+                console.error("❌ Timeout en verificación directa con Firebase");
+                resolve(false);
+            }, 5000);
+        });
+    } catch (error) {
+        console.error("Error al verificar conexión:", error);
+        return false;
+    }
+};
+
+// Inicializar la app
+const initApp = async () => {
+    let connectionChecked = false;
+    let connectionOk = false;
+    
+    try {
+        // Verificar la conexión a Firebase
+        connectionOk = await checkFirebaseConnection();
+        connectionChecked = true;
+        
+        // Si la conexión es exitosa, cargar los parkings
+        if (connectionOk) {
+            console.log("🔥 Inicializando carga de cajones...");
+            getParkings();
+        } else {
+            console.error("❌ No hay conexión con Firebase");
+            parkingsList.innerHTML = `
+                <div class="error-container">
+                    <p>Error de conexión con Firebase. No se pueden cargar los cajones.</p>
+                    <button id="retryButton" class="btn waves-effect waves-light">
+                        <i class="material-icons left">refresh</i> Reintentar
+                    </button>
+                </div>
+            `;
+            
+            // Agregar botón para reintentar
+            document.getElementById("retryButton").addEventListener("click", () => {
+                parkingsList.innerHTML = "<p>Intentando reconectar...</p>";
+                setTimeout(initApp, 1000);
+            });
+        }
+    } catch (error) {
+        console.error("Error al inicializar la app:", error);
+        parkingsList.innerHTML = `<p>Error al inicializar: ${error.message}</p>`;
+    }
+};
+
+// Cargar datos
+document.addEventListener("DOMContentLoaded", () => {
+    initApp();
+});
